@@ -1,0 +1,78 @@
+name: Build Phase Zero 6.0.6 unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Select newest installed Xcode 26
+        shell: bash
+        run: |
+          set -euo pipefail
+          XCODE_APP="$(python3 - <<'PY'
+          import glob
+          import re
+
+          def version(path: str) -> tuple[int, ...]:
+              match = re.search(r"Xcode_([0-9.]+)\.app$", path)
+              return tuple(int(part) for part in match.group(1).split(".")) if match else (0,)
+
+          matches = sorted(glob.glob("/Applications/Xcode_26*.app"), key=version)
+          print(matches[-1] if matches else "")
+          PY
+          )"
+          if [[ -z "$XCODE_APP" ]]; then
+            echo "::error::No Xcode 26 installation was found on this runner."
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        shell: bash
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Build unsigned IPA
+        shell: bash
+        run: |
+          chmod +x Scripts/build_unsigned_ipa.sh
+          Scripts/build_unsigned_ipa.sh
+
+      - name: Upload IPA
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: PhaseZero-HangarRadio-6.0.6-unsigned-ipa
+          path: |
+            dist/*.ipa
+            dist/*.sha256
+            dist/source-plist-diagnostics.txt
+            dist/fullscreen-diagnostics.txt
+            dist/ipa-metadata-diagnostics.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload compiler diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: PhaseZero-HangarRadio-6.0.6-build-log
+          path: |
+            build/xcodebuild.log
+            dist/source-plist-diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 14
