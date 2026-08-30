@@ -61,12 +61,12 @@ struct RootView: View {
             SystemLabView(model: model)
         }
         .task {
-            print("[PhaseZero] Hangar Radio 6.0.4 root appeared")
+            print("[PhaseZero] Hangar Radio 6.0.5 root appeared")
             await Task.yield()
             try? await Task.sleep(nanoseconds: 180_000_000)
             engineMounted = true
             model.beginEngineBootWatchdog()
-            print("[PhaseZero] Hangar Radio 6.0.4 web engine mounted")
+            print("[PhaseZero] Hangar Radio 6.0.5 web engine mounted")
         }
     }
 

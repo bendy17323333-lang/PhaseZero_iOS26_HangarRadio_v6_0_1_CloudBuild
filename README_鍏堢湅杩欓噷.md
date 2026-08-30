@@ -1,41 +1,60 @@
-# 零点相位 6.0.4：iPhone 原生分辨率元数据修复
+# 零点相位 6.0.5：XcodeGen Info.plist 覆盖修复
 
-6.0.3 的 GitHub Actions 日志已经证明：Swift、MusicKit、资源和 `LaunchScreen.storyboardc` 全部编译成功，但 Xcode 26.6 最终生成的 App `Info.plist` 丢失了 `UILaunchStoryboardName` 与横屏方向数组。构建脚本因此主动停止，避免再产出一个可能落入旧式 480×320 兼容画布的 IPA。
+6.0.4 的 Xcode 编译本身已经成功，但构建脚本随后报：
 
-6.0.4 不再只依赖 Xcode 的 plist 合并行为。它会在 **Xcode 构建完成后、IPA 打包前** 修复最终 App Bundle 内的 `Info.plist`，随后再从 IPA 内部读取一次并验证。
+```text
+NSAppleMusicUsageDescription is missing after repair
+```
+
+本次确认根因不是 MusicKit，也不是 Python 无法写入中文字符串，而是 `project.yml` 中使用了 XcodeGen 的 `info:` 生成器。该配置会在每次 `xcodegen generate` 时重新写入指定路径的 Info.plist；由于没有同时在 `info.properties` 中列出自定义键，原来的 Apple Music、陀螺仪、启动屏和方向字段被生成过程覆盖。
+
+6.0.5 改为直接设置：
+
+```yaml
+GENERATE_INFOPLIST_FILE: NO
+INFOPLIST_FILE: BuildSupport/Info.plist
+```
+
+并彻底删除 target 的 `info:` 块。构建脚本会在 XcodeGen 前后计算源 plist 的 SHA-256；只要生成过程再改动它，构建立即失败并指出原因。
 
 ## 更新现有仓库
 
-解压 `PhaseZero_iOS26_HangarRadio_v6_0_4_MetadataHotfix_ONLY.zip`，把文件夹内部内容上传到仓库根目录并覆盖旧文件。必须保留隐藏的 `.github` 文件夹。
+解压 `PhaseZero_iOS26_HangarRadio_v6_0_5_InfoPlistHotfix_ONLY.zip`，把最外层文件夹里的内容按原路径上传到仓库根目录并覆盖旧文件。必须包含隐藏的 `.github` 文件夹。
 
-然后运行：
+随后运行：
 
 ```text
-Build Phase Zero 6.0.4 unsigned IPA
+Build Phase Zero 6.0.5 unsigned IPA
 ```
 
 成功产物：
 
 ```text
-PhaseZero-HangarRadio-6.0.4-unsigned-ipa
+PhaseZero-HangarRadio-6.0.5-unsigned-ipa
 ```
 
-里面应有：
+其中应包含：
 
 ```text
-PhaseZero-HangarRadio-6.0.4-unsigned.ipa
-PhaseZero-HangarRadio-6.0.4-unsigned.ipa.sha256
+PhaseZero-HangarRadio-6.0.5-unsigned.ipa
+PhaseZero-HangarRadio-6.0.5-unsigned.ipa.sha256
+source-plist-diagnostics.txt
 fullscreen-diagnostics.txt
 ipa-metadata-diagnostics.txt
 ```
 
-两个诊断文件都应显示：
+`source-plist-diagnostics.txt` 中，XcodeGen 前后的两个 SHA-256 必须一致。
+
+`ipa-metadata-diagnostics.txt` 中应显示：
 
 ```text
 UILaunchStoryboardName='LaunchScreen'
 UIDeviceFamily=[1, 2]
+NSAppleMusicUsageDescription present=True
+NSMotionUsageDescription present=True
+resource LaunchScreen.storyboardc=True
 ```
 
 ## 安装
 
-先覆盖安装，以尽量保留机型和演算点进度。仍有左右黑边时，再删除旧 App、重启 iPhone、重新签名并安装 6.0.4。删除 App 会清除未备份的本地进度。
+优先覆盖安装，以保留演算点和机型进度。若仍处于 480×320 兼容画布，再删除旧 App、重启 iPhone并重新签名安装。删除 App 会清除未备份的本地进度。

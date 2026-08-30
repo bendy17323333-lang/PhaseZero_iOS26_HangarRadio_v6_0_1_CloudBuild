@@ -9,6 +9,7 @@ DIST_DIR="$ROOT/dist"
 PROJECT="$ROOT/PhaseZero.xcodeproj"
 PBXPROJ="$PROJECT/project.pbxproj"
 SCHEME="PhaseZero"
+INFO_SOURCE="BuildSupport/Info.plist"
 
 mkdir -p "$BUILD_DIR" "$DIST_DIR"
 
@@ -35,7 +36,7 @@ LAUNCH_STORYBOARD_SOURCE="Sources/AppModule/Resources/LaunchScreen.storyboard"
 
 required=(
   "project.yml"
-  "BuildSupport/Info.plist"
+  "$INFO_SOURCE"
   "Scripts/repair_built_info_plist.py"
   "Sources/AppModule/PhaseZeroPlaygroundApp.swift"
   "Sources/AppModule/Services/AppleMusicService.swift"
@@ -53,17 +54,86 @@ for path in "${required[@]}"; do
 done
 
 rm -rf "$BUILD_DIR/DerivedData" "$PROJECT" "$DIST_DIR/Payload"
-rm -f "$DIST_DIR"/*.ipa "$DIST_DIR"/*.sha256 "$DIST_DIR/fullscreen-diagnostics.txt" "$DIST_DIR/ipa-metadata-diagnostics.txt"
+rm -f \
+  "$DIST_DIR"/*.ipa \
+  "$DIST_DIR"/*.sha256 \
+  "$DIST_DIR/source-plist-diagnostics.txt" \
+  "$DIST_DIR/fullscreen-diagnostics.txt" \
+  "$DIST_DIR/ipa-metadata-diagnostics.txt"
 
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "::error::XcodeGen is not installed."
   exit 3
 fi
 
+# V6.0.4 exposed the actual issue: targets.<name>.info tells XcodeGen to
+# generate and overwrite a plist at that path. V6.0.5 uses INFOPLIST_FILE
+# instead. Validate the source plist before and after project generation so
+# this can never silently regress again.
+SOURCE_PLIST_DIAGNOSTICS="$DIST_DIR/source-plist-diagnostics.txt"
+python3 - "$INFO_SOURCE" "$SOURCE_PLIST_DIAGNOSTICS" <<'PYSOURCE'
+import plistlib
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+report_path = Path(sys.argv[2])
+with source_path.open("rb") as handle:
+    info = plistlib.load(handle)
+
+required_strings = [
+    "NSAppleMusicUsageDescription",
+    "NSMotionUsageDescription",
+    "UILaunchStoryboardName",
+]
+missing = [
+    key
+    for key in required_strings
+    if not isinstance(info.get(key), str) or not info.get(key).strip()
+]
+landscape = {
+    "UIInterfaceOrientationLandscapeLeft",
+    "UIInterfaceOrientationLandscapeRight",
+}
+orientations = set(info.get("UISupportedInterfaceOrientations", []))
+lines = [
+    f"source={source_path}",
+    f"NSAppleMusicUsageDescription present={bool(info.get('NSAppleMusicUsageDescription'))}",
+    f"NSMotionUsageDescription present={bool(info.get('NSMotionUsageDescription'))}",
+    f"UILaunchStoryboardName={info.get('UILaunchStoryboardName')!r}",
+    f"UISupportedInterfaceOrientations={info.get('UISupportedInterfaceOrientations')!r}",
+]
+report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print("Source Info.plist preflight:")
+for line in lines:
+    print("  " + line)
+if missing:
+    raise SystemExit(f"source Info.plist is missing required string keys: {missing!r}")
+if info.get("UILaunchStoryboardName") != "LaunchScreen":
+    raise SystemExit("source Info.plist must use UILaunchStoryboardName=LaunchScreen")
+if not landscape.issubset(orientations):
+    raise SystemExit("source Info.plist must advertise both landscape orientations")
+PYSOURCE
+/usr/bin/plutil -lint "$INFO_SOURCE"
+INFO_HASH_BEFORE="$(shasum -a 256 "$INFO_SOURCE" | awk '{print $1}')"
+echo "Source Info.plist SHA-256 before XcodeGen: $INFO_HASH_BEFORE" | tee -a "$SOURCE_PLIST_DIAGNOSTICS"
+
 xcodegen generate --spec project.yml
 
+INFO_HASH_AFTER="$(shasum -a 256 "$INFO_SOURCE" | awk '{print $1}')"
+echo "Source Info.plist SHA-256 after XcodeGen:  $INFO_HASH_AFTER" | tee -a "$SOURCE_PLIST_DIAGNOSTICS"
+if [[ "$INFO_HASH_BEFORE" != "$INFO_HASH_AFTER" ]]; then
+  echo "::error file=project.yml::XcodeGen modified BuildSupport/Info.plist. Remove targets.PhaseZero.info and set INFOPLIST_FILE directly."
+  exit 10
+fi
+
+if ! grep -Fq "INFOPLIST_FILE" "$PBXPROJ" || ! grep -Fq "BuildSupport/Info.plist" "$PBXPROJ"; then
+  echo "::error file=project.yml::Generated project is not using BuildSupport/Info.plist through INFOPLIST_FILE."
+  exit 11
+fi
+
 # Fail before the expensive compile if XcodeGen did not actually put the game
-# resource and asset catalog into the generated project.
+# resources into the generated project.
 for expected in "phase_zero_native.html" "Assets.xcassets" "PrivacyInfo.xcprivacy" "LaunchScreen.storyboard"; do
   if ! grep -Fq "$expected" "$PBXPROJ"; then
     echo "::error file=project.yml::Generated Xcode project is missing $expected. Check the resource entries under targets.PhaseZero.sources."
@@ -96,14 +166,14 @@ if [[ $status -ne 0 ]]; then
   exit "$status"
 fi
 
-APP_PATH="$(python3 - "$BUILD_DIR/DerivedData/Build/Products/Release-iphoneos" <<'PY'
+APP_PATH="$(python3 - "$BUILD_DIR/DerivedData/Build/Products/Release-iphoneos" <<'PYAPP'
 import glob
 import os
 import sys
 root = sys.argv[1]
 apps = sorted(path for path in glob.glob(os.path.join(root, "*.app")) if os.path.isdir(path))
 print(apps[0] if apps else "")
-PY
+PYAPP
 )"
 if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
   echo "::error::Xcode reported success but no Release-iphoneos .app was found."
@@ -112,7 +182,7 @@ fi
 
 find_resource() {
   local name="$1"
-  python3 - "$APP_PATH" "$name" <<'PY'
+  python3 - "$APP_PATH" "$name" <<'PYFIND'
 import os
 import sys
 root, target = sys.argv[1], sys.argv[2]
@@ -120,14 +190,11 @@ for current, _, files in os.walk(root):
     if target in files:
         print(os.path.join(current, target))
         break
-PY
+PYFIND
 }
 
 HTML_PATH="$(find_resource phase_zero_native.html)"
 if [[ -z "$HTML_PATH" || ! -f "$HTML_PATH" ]]; then
-  # The project spec should already copy this resource. This fallback keeps the
-  # unsigned artifact usable even if a future XcodeGen version changes folder
-  # handling. The later signer will seal the copied file into the final bundle.
   echo "::warning::Xcode build omitted phase_zero_native.html; applying deterministic unsigned-bundle fallback copy."
   mkdir -p "$APP_PATH/Web"
   /usr/bin/ditto "$HTML_SOURCE" "$APP_PATH/Web/phase_zero_native.html"
@@ -148,16 +215,15 @@ fi
 
 LAUNCH_STORYBOARDC="$(find "$APP_PATH" -maxdepth 2 -type d -name 'LaunchScreen.storyboardc' -print -quit)"
 if [[ -z "$LAUNCH_STORYBOARDC" || ! -d "$LAUNCH_STORYBOARDC" ]]; then
-  echo "::error::The app bundle does not contain LaunchScreen.storyboardc. Without a compiled launch storyboard, modern iPhones can fall back to the legacy 480x320 compatibility canvas."
+  echo "::error::The app bundle does not contain LaunchScreen.storyboardc. Without it, modern iPhones can fall back to the legacy 480x320 compatibility canvas."
   exit 9
 fi
 
-# The 6.0.3 Xcode 26.6 log proved that the storyboard can compile correctly
-# while launch/orientation keys still disappear from the processed plist.
-# Repair the unsigned app bundle before IPA creation; the user's later signer
-# will seal this exact repaired plist.
+# Preserve Xcode's expanded bundle/version metadata while restoring any runtime
+# fields that did not survive processing. The script contains independent
+# fallbacks for the two privacy strings as a second line of defence.
 python3 Scripts/repair_built_info_plist.py \
-  BuildSupport/Info.plist \
+  "$INFO_SOURCE" \
   "$APP_PATH/Info.plist"
 /usr/bin/plutil -lint "$APP_PATH/Info.plist"
 
@@ -167,29 +233,35 @@ import plistlib
 import sys
 
 info_path, report_path = sys.argv[1], sys.argv[2]
-with open(info_path, 'rb') as handle:
+with open(info_path, "rb") as handle:
     info = plistlib.load(handle)
-launch_name = info.get('UILaunchStoryboardName')
-families = info.get('UIDeviceFamily', [])
-orientations = info.get('UISupportedInterfaceOrientations', [])
+launch_name = info.get("UILaunchStoryboardName")
+families = info.get("UIDeviceFamily", [])
+orientations = info.get("UISupportedInterfaceOrientations", [])
 lines = [
     f"UILaunchStoryboardName={launch_name!r}",
     f"UIDeviceFamily={families!r}",
     f"UISupportedInterfaceOrientations={orientations!r}",
     f"MinimumOSVersion={info.get('MinimumOSVersion')!r}",
+    f"NSAppleMusicUsageDescription present={bool(info.get('NSAppleMusicUsageDescription'))}",
+    f"NSMotionUsageDescription present={bool(info.get('NSMotionUsageDescription'))}",
 ]
-with open(report_path, 'w', encoding='utf-8') as report:
+with open(report_path, "w", encoding="utf-8") as report:
     report.write("\n".join(lines) + "\n")
 print("Fullscreen metadata check:")
 for line in lines:
     print("  " + line)
-if launch_name != 'LaunchScreen':
-    raise SystemExit('Final app Info.plist is missing UILaunchStoryboardName=LaunchScreen')
+if launch_name != "LaunchScreen":
+    raise SystemExit("Final app Info.plist is missing UILaunchStoryboardName=LaunchScreen")
 if 1 not in families:
-    raise SystemExit('Final app UIDeviceFamily does not include iPhone (1)')
-required = {'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'}
+    raise SystemExit("Final app UIDeviceFamily does not include iPhone (1)")
+required = {"UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"}
 if not required.issubset(set(orientations)):
-    raise SystemExit('Final app does not advertise both landscape orientations for iPhone')
+    raise SystemExit("Final app does not advertise both landscape orientations for iPhone")
+if not info.get("NSAppleMusicUsageDescription"):
+    raise SystemExit("Final app lost NSAppleMusicUsageDescription")
+if not info.get("NSMotionUsageDescription"):
+    raise SystemExit("Final app lost NSMotionUsageDescription")
 PYINFO
 
 for packaged in "$HTML_PATH" "$PRIVACY_PATH" "$APP_PATH/Assets.car"; do
@@ -200,30 +272,23 @@ for packaged in "$HTML_PATH" "$PRIVACY_PATH" "$APP_PATH/Assets.car"; do
 done
 
 echo "Packaged resource check:"
-echo "  HTML:   ${HTML_PATH#$APP_PATH/}"
-echo "  Privacy:${PRIVACY_PATH#$APP_PATH/}"
-echo "  Assets: Assets.car"
-echo "  Launch: ${LAUNCH_STORYBOARDC#$APP_PATH/}"
+echo "  HTML:    ${HTML_PATH#$APP_PATH/}"
+echo "  Privacy: ${PRIVACY_PATH#$APP_PATH/}"
+echo "  Assets:  Assets.car"
+echo "  Launch:  ${LAUNCH_STORYBOARDC#$APP_PATH/}"
 
 PAYLOAD_DIR="$DIST_DIR/Payload"
 mkdir -p "$PAYLOAD_DIR"
 /usr/bin/ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
 
-IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.4-unsigned.ipa"
+IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.5-unsigned.ipa"
 (
   cd "$DIST_DIR"
   /usr/bin/zip -qry "$(basename "$IPA")" Payload
 )
 shasum -a 256 "$IPA" > "$IPA.sha256"
-
-# Basic artifact sanity checks. An unsigned IPA is expected here; SideStore,
-# AltStore, Signulous, or a later signed archive step supplies the signature.
 /usr/bin/unzip -tq "$IPA"
 test -s "$IPA"
-/usr/bin/unzip -l "$IPA" | grep -Fq "phase_zero_native.html"
-/usr/bin/unzip -l "$IPA" | grep -Fq "PrivacyInfo.xcprivacy"
-/usr/bin/unzip -l "$IPA" | grep -Fq "Assets.car"
-/usr/bin/unzip -l "$IPA" | grep -Fq "LaunchScreen.storyboardc"
 
 IPA_METADATA_DIAGNOSTICS="$DIST_DIR/ipa-metadata-diagnostics.txt"
 python3 - "$IPA" "$IPA_METADATA_DIAGNOSTICS" <<'PYIPA'

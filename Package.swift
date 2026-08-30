@@ -4,7 +4,7 @@ import PackageDescription
 import AppleProductTypes
 
 let package = Package(
-    name: "PhaseZeroIOS26HangarRadio604",
+    name: "PhaseZeroIOS26HangarRadio605",
     defaultLocalization: "zh-Hans",
     platforms: [
         .iOS("26.0")
@@ -14,8 +14,8 @@ let package = Package(
             name: "零点相位",
             targets: ["AppModule"],
             bundleIdentifier: "com.asher.phasezero.ios26hangarradio600",
-            displayVersion: "6.0.4",
-            bundleVersion: "14",
+            displayVersion: "6.0.5",
+            bundleVersion: "15",
             appIcon: .asset("AppIcon"),
             accentColor: .asset("AccentColor"),
             supportedDeviceFamilies: [
