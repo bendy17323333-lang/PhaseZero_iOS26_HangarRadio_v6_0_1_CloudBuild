@@ -36,6 +36,7 @@ LAUNCH_STORYBOARD_SOURCE="Sources/AppModule/Resources/LaunchScreen.storyboard"
 required=(
   "project.yml"
   "BuildSupport/Info.plist"
+  "Scripts/repair_built_info_plist.py"
   "Sources/AppModule/PhaseZeroPlaygroundApp.swift"
   "Sources/AppModule/Services/AppleMusicService.swift"
   "Sources/AppModule/Services/GameBridge.swift"
@@ -52,7 +53,7 @@ for path in "${required[@]}"; do
 done
 
 rm -rf "$BUILD_DIR/DerivedData" "$PROJECT" "$DIST_DIR/Payload"
-rm -f "$DIST_DIR"/*.ipa "$DIST_DIR"/*.sha256 "$DIST_DIR/fullscreen-diagnostics.txt"
+rm -f "$DIST_DIR"/*.ipa "$DIST_DIR"/*.sha256 "$DIST_DIR/fullscreen-diagnostics.txt" "$DIST_DIR/ipa-metadata-diagnostics.txt"
 
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "::error::XcodeGen is not installed."
@@ -151,6 +152,15 @@ if [[ -z "$LAUNCH_STORYBOARDC" || ! -d "$LAUNCH_STORYBOARDC" ]]; then
   exit 9
 fi
 
+# The 6.0.3 Xcode 26.6 log proved that the storyboard can compile correctly
+# while launch/orientation keys still disappear from the processed plist.
+# Repair the unsigned app bundle before IPA creation; the user's later signer
+# will seal this exact repaired plist.
+python3 Scripts/repair_built_info_plist.py \
+  BuildSupport/Info.plist \
+  "$APP_PATH/Info.plist"
+/usr/bin/plutil -lint "$APP_PATH/Info.plist"
+
 FULLSCREEN_DIAGNOSTICS="$DIST_DIR/fullscreen-diagnostics.txt"
 python3 - "$APP_PATH/Info.plist" "$FULLSCREEN_DIAGNOSTICS" <<'PYINFO'
 import plistlib
@@ -199,7 +209,7 @@ PAYLOAD_DIR="$DIST_DIR/Payload"
 mkdir -p "$PAYLOAD_DIR"
 /usr/bin/ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
 
-IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.3-unsigned.ipa"
+IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.4-unsigned.ipa"
 (
   cd "$DIST_DIR"
   /usr/bin/zip -qry "$(basename "$IPA")" Payload
@@ -214,6 +224,79 @@ test -s "$IPA"
 /usr/bin/unzip -l "$IPA" | grep -Fq "PrivacyInfo.xcprivacy"
 /usr/bin/unzip -l "$IPA" | grep -Fq "Assets.car"
 /usr/bin/unzip -l "$IPA" | grep -Fq "LaunchScreen.storyboardc"
+
+IPA_METADATA_DIAGNOSTICS="$DIST_DIR/ipa-metadata-diagnostics.txt"
+python3 - "$IPA" "$IPA_METADATA_DIAGNOSTICS" <<'PYIPA'
+import plistlib
+import sys
+import zipfile
+
+ipa_path, report_path = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(ipa_path) as archive:
+    names = archive.namelist()
+    plist_entries = [
+        name
+        for name in names
+        if name.startswith("Payload/") and name.endswith(".app/Info.plist")
+    ]
+    if len(plist_entries) != 1:
+        raise SystemExit(
+            f"expected exactly one app Info.plist in IPA, found {plist_entries!r}"
+        )
+    info = plistlib.loads(archive.read(plist_entries[0]))
+
+launch = info.get("UILaunchStoryboardName")
+families = info.get("UIDeviceFamily", [])
+orientations = info.get("UISupportedInterfaceOrientations", [])
+landscape = {
+    "UIInterfaceOrientationLandscapeLeft",
+    "UIInterfaceOrientationLandscapeRight",
+}
+resources = {
+    "phase_zero_native.html": any(
+        name.endswith("/phase_zero_native.html") for name in names
+    ),
+    "PrivacyInfo.xcprivacy": any(
+        name.endswith("/PrivacyInfo.xcprivacy") for name in names
+    ),
+    "Assets.car": any(name.endswith("/Assets.car") for name in names),
+    "LaunchScreen.storyboardc": any(
+        "/LaunchScreen.storyboardc/" in name for name in names
+    ),
+}
+lines = [
+    f"Info.plist entry={plist_entries[0]!r}",
+    f"UILaunchStoryboardName={launch!r}",
+    f"UIDeviceFamily={families!r}",
+    f"UISupportedInterfaceOrientations={orientations!r}",
+    "UISupportedInterfaceOrientations~ipad="
+    f"{info.get('UISupportedInterfaceOrientations~ipad')!r}",
+    "NSAppleMusicUsageDescription present="
+    f"{bool(info.get('NSAppleMusicUsageDescription'))}",
+    "NSMotionUsageDescription present="
+    f"{bool(info.get('NSMotionUsageDescription'))}",
+]
+for key, value in resources.items():
+    lines.append(f"resource {key}={value}")
+with open(report_path, "w", encoding="utf-8") as report:
+    report.write("\n".join(lines) + "\n")
+print("Final IPA metadata check:")
+for line in lines:
+    print("  " + line)
+
+if launch != "LaunchScreen":
+    raise SystemExit("IPA lost UILaunchStoryboardName=LaunchScreen")
+if 1 not in families:
+    raise SystemExit("IPA lost iPhone UIDeviceFamily support")
+if not landscape.issubset(set(orientations)):
+    raise SystemExit("IPA lost the two landscape orientations")
+if not info.get("NSAppleMusicUsageDescription"):
+    raise SystemExit("IPA lost NSAppleMusicUsageDescription")
+if not info.get("NSMotionUsageDescription"):
+    raise SystemExit("IPA lost NSMotionUsageDescription")
+if not all(resources.values()):
+    raise SystemExit(f"IPA resource check failed: {resources!r}")
+PYIPA
 
 echo "Built: $IPA"
 cat "$IPA.sha256"
