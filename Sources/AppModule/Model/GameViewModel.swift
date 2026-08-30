@@ -35,6 +35,7 @@ final class GameViewModel: ObservableObject {
     @Published var showSystemLab = false
     @Published var showHangar = false
     @Published var showPhaseRadio = false
+    @Published private(set) var radioSource: PhaseRadioSource = .gameSoundtrack
     @Published var lastPhiReward = 0
     @Published var errorMessage: String?
     @Published var selectedRunMode: RunMode = .free
@@ -70,8 +71,15 @@ final class GameViewModel: ObservableObject {
             guard let self, self.state == .playing else { return }
             self.bridge.send(command: "motion", payload: ["turnRate": rate])
         }
-        appleMusic.onPlaybackActivityChanged = { [weak self] _ in
-            self?.pushSettings()
+        appleMusic.onPlaybackActivityChanged = { [weak self] active in
+            guard let self else { return }
+            if active { self.radioSource = .appleMusic }
+            self.pushSettings()
+        }
+        appleMusic.onAudioFocusChanged = { [weak self] focused in
+            guard let self else { return }
+            if focused { self.radioSource = .appleMusic }
+            self.pushSettings()
         }
     }
 
@@ -304,13 +312,82 @@ final class GameViewModel: ObservableObject {
             command: "settings",
             payload: settings.nativePayload(
                 performance: performance.snapshot,
-                externalMusicActive: appleMusic.isPlaying
+                externalMusicActive: appleMusic.holdsAudioFocus
             )
         )
     }
 
     func flushSettingsChanges() {
         settings.flushPendingChanges()
+    }
+
+    var activeBuiltInSoundtrack: BuiltInSoundtrack {
+        BuiltInSoundtrack.definition(for: settings.gameMusicTrackID)
+    }
+
+    var isBuiltInSoundtrackAudible: Bool {
+        settings.soundEnabled
+            && settings.gameMusicEnabled
+            && !(settings.duckGameMusicForAppleMusic && appleMusic.holdsAudioFocus)
+    }
+
+    func selectBuiltInSoundtrack(_ id: String) {
+        let track = BuiltInSoundtrack.definition(for: id)
+        appleMusic.pauseForGameSoundtrack()
+        radioSource = .gameSoundtrack
+        settings.gameMusicTrackID = track.id
+        settings.gameMusicEnabled = true
+        settings.flushPendingChanges()
+        pushSettings()
+        bridge.send(
+            command: "soundtrack",
+            payload: ["track": track.id, "enabled": true]
+        )
+        haptics.play("selection", enabled: settings.hapticsEnabled)
+    }
+
+    func toggleBuiltInSoundtrack() {
+        if radioSource != .gameSoundtrack || !settings.gameMusicEnabled {
+            selectBuiltInSoundtrack(settings.gameMusicTrackID)
+            return
+        }
+        settings.gameMusicEnabled = false
+        settings.flushPendingChanges()
+        pushSettings()
+        bridge.send(
+            command: "soundtrack",
+            payload: ["track": settings.gameMusicTrackID, "enabled": false]
+        )
+    }
+
+    func skipBuiltInSoundtrack(delta: Int) {
+        let next = BuiltInSoundtrack.adjacent(to: settings.gameMusicTrackID, delta: delta)
+        selectBuiltInSoundtrack(next.id)
+    }
+
+    func playAppleMusicSong(id: String) {
+        radioSource = .appleMusic
+        appleMusic.playSong(id: id)
+    }
+
+    func playAppleMusicPlaylist(id: String) {
+        radioSource = .appleMusic
+        appleMusic.playPlaylist(id: id)
+    }
+
+    func toggleAppleMusicPlayback() {
+        radioSource = .appleMusic
+        appleMusic.togglePlayback()
+    }
+
+    func skipAppleMusicNext() {
+        radioSource = .appleMusic
+        appleMusic.skipNext()
+    }
+
+    func skipAppleMusicPrevious() {
+        radioSource = .appleMusic
+        appleMusic.skipPrevious()
     }
 
     func activateLaboratoryOverride() {

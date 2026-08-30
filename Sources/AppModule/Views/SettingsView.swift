@@ -130,35 +130,42 @@ struct SettingsView: View {
     }
 
     private var musicPanel: some View {
-        GlassPanel(tint: .pink, cornerRadius: 24, padding: 18) {
+        let appleMode = model.radioSource == .appleMusic
+        let gameTrack = model.activeBuiltInSoundtrack
+        let title = appleMode ? music.currentTitle : gameTrack.title
+        let subtitle = appleMode ? music.currentSubtitle : "\(gameTrack.subtitle) · \(gameTrack.tempoLabel)"
+        let seed = appleMode ? music.currentTrackSeed : "game|\(gameTrack.id)"
+        let playing = appleMode ? music.isPlaying : model.isBuiltInSoundtrackAudible
+        let tint = appleMode ? Color.pink : gameTrack.tint
+        let secondaryTint = appleMode ? Color.cyan : gameTrack.secondaryTint
+
+        return GlassPanel(tint: tint, cornerRadius: 24, padding: 18) {
             VStack(alignment: .leading, spacing: 13) {
                 HStack {
-                    settingsHeader("相位电台", icon: "music.note.house.fill")
+                    settingsHeader("相位电台", icon: appleMode ? "music.note" : "waveform.path.ecg")
                     Spacer()
-                    Text(music.isPlaying ? "LIVE" : music.accessState.title.uppercased())
+                    Text(appleMode ? (music.isPlaying ? "APPLE LIVE" : "APPLE PAUSED") : (settings.gameMusicEnabled ? "GAME OST" : "OST PAUSED"))
                         .font(.system(size: 8, weight: .black, design: .monospaced))
-                        .foregroundStyle(music.isPlaying ? .mint : .secondary)
+                        .foregroundStyle(playing ? .mint : .secondary)
                 }
 
                 HStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 15, style: .continuous)
-                            .fill(AngularGradient(colors: [.cyan.opacity(0.45), .purple.opacity(0.48), .pink.opacity(0.50), .cyan.opacity(0.45)], center: .center))
-                        Image(systemName: music.isPlaying ? "waveform" : "music.note")
-                            .font(.title2.weight(.black))
-                            .foregroundStyle(.white.opacity(0.82))
-                    }
-                    .frame(width: 58, height: 58)
+                    RadioArtworkView(
+                        source: model.radioSource,
+                        music: music,
+                        gameTrack: gameTrack,
+                        size: 58
+                    )
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(music.currentTitle)
+                        Text(title)
                             .font(.subheadline.weight(.black))
                             .lineLimit(1)
-                        Text(music.currentSubtitle)
+                        Text(subtitle)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        Text(music.accessState.detail)
+                        Text(appleMode ? music.accessState.detail : "游戏原声无需账号，连接 Apple Music 后也不会从电台消失。")
                             .font(.system(size: 8))
                             .foregroundStyle(.white.opacity(0.56))
                             .lineLimit(2)
@@ -166,11 +173,11 @@ struct SettingsView: View {
                 }
 
                 PhaseAudioVisualizer(
-                    seed: music.currentTrackSeed,
-                    playbackTime: music.playbackTime,
-                    isPlaying: music.isPlaying,
-                    tint: .cyan,
-                    secondaryTint: .pink,
+                    seed: seed,
+                    playbackTime: appleMode ? music.playbackTime : 0,
+                    isPlaying: playing,
+                    tint: secondaryTint,
+                    secondaryTint: tint,
                     suspended: musicVisualizerSuspended,
                     barCount: 26
                 )
@@ -178,7 +185,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 7)
                 .background(.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
 
-                if music.accessState == .authorized {
+                if appleMode, music.accessState == .authorized {
                     DeferredSeekSlider(
                         playbackTime: music.playbackTime,
                         duration: music.duration,
@@ -190,24 +197,31 @@ struct SettingsView: View {
                     )
 
                     HStack(spacing: 8) {
-                        Button { music.skipPrevious() } label: {
+                        Button { model.skipAppleMusicPrevious() } label: {
                             Image(systemName: "backward.fill").frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.glass)
 
-                        Button { music.togglePlayback() } label: {
-                            Image(systemName: music.isPlaying ? "pause.fill" : "play.fill")
-                                .frame(maxWidth: .infinity)
+                        Button { model.toggleAppleMusicPlayback() } label: {
+                            Group {
+                                if music.isPreparingPlayback {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: music.isPlaying ? "pause.fill" : "play.fill")
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.glassProminent)
                         .tint(.pink)
 
-                        Button { music.skipNext() } label: {
+                        Button { model.skipAppleMusicNext() } label: {
                             Image(systemName: "forward.fill").frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.glass)
                     }
-                } else {
+                    .disabled(music.isPreparingPlayback)
+                } else if appleMode {
                     Button {
                         Task { await music.requestAccessAndLoad() }
                     } label: {
@@ -217,9 +231,35 @@ struct SettingsView: View {
                     .buttonStyle(.glassProminent)
                     .tint(.pink)
                     .disabled(music.accessState == .restricted || music.accessState == .unavailable)
+                } else {
+                    HStack(spacing: 8) {
+                        Button { model.skipBuiltInSoundtrack(delta: -1) } label: {
+                            Image(systemName: "backward.fill").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.glass)
+
+                        Button { model.toggleBuiltInSoundtrack() } label: {
+                            Image(systemName: settings.gameMusicEnabled ? "pause.fill" : "play.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.glassProminent)
+                        .tint(gameTrack.tint)
+
+                        Button { model.skipBuiltInSoundtrack(delta: 1) } label: {
+                            Image(systemName: "forward.fill").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.glass)
+                    }
                 }
 
-                Toggle("播放 Apple Music 时压低游戏合成音乐", isOn: $settings.duckGameMusicForAppleMusic)
+                if appleMode, let error = music.errorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(3)
+                }
+
+                Toggle("播放 Apple Music 时压低游戏原声", isOn: $settings.duckGameMusicForAppleMusic)
                     .font(.caption)
 
                 Button {

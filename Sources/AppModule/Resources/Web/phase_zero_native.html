@@ -718,6 +718,42 @@
     landscapeInstruction: document.getElementById('landscapeInstruction')
   };
 
+
+  const GAME_SOUNDTRACKS = Object.freeze({
+    phase_pulse: {
+      interval: 430,
+      bass: [55, 55, 65.41, 49, 55, 73.42, 65.41, 49],
+      type: 'triangle', noteLength: .34, bassGain: .055,
+      harmonyEvery: 2, harmonyRatio: 2, harmonyGain: .018,
+      lead: [0, 7, 12, 7, 3, 10, 12, 5], leadEvery: 4, leadGain: .014,
+      noiseEvery: 4, noiseGain: .010, noiseFilter: 3600
+    },
+    prism_circuit: {
+      interval: 360,
+      bass: [65.41, 82.41, 98, 73.42, 65.41, 110, 98, 82.41],
+      type: 'triangle', noteLength: .28, bassGain: .047,
+      harmonyEvery: 2, harmonyRatio: 1.5, harmonyGain: .016,
+      lead: [12, 19, 24, 16, 14, 21, 26, 19], leadEvery: 2, leadGain: .013,
+      noiseEvery: 4, noiseGain: .008, noiseFilter: 5200
+    },
+    null_current: {
+      interval: 560,
+      bass: [41.2, 41.2, 49, 36.71, 41.2, 55, 49, 36.71],
+      type: 'sine', noteLength: .48, bassGain: .060,
+      harmonyEvery: 2, harmonyRatio: 2, harmonyGain: .012,
+      lead: [0, 3, 7, 10, 7, 3, 12, 5], leadEvery: 4, leadGain: .010,
+      noiseEvery: 8, noiseGain: .006, noiseFilter: 1800
+    },
+    overdrive_trace: {
+      interval: 300,
+      bass: [55, 65.41, 73.42, 49, 82.41, 73.42, 98, 65.41],
+      type: 'sawtooth', noteLength: .23, bassGain: .038,
+      harmonyEvery: 2, harmonyRatio: 2, harmonyGain: .013,
+      lead: [12, 15, 19, 22, 24, 19, 27, 22], leadEvery: 2, leadGain: .011,
+      noiseEvery: 2, noiseGain: .009, noiseFilter: 4200
+    }
+  });
+
   class AudioEngine {
     constructor() {
       this.ctx = null;
@@ -728,6 +764,9 @@
       this.step = 0;
       this.noiseBuffer = null;
       this.externalMusicActive = false;
+      this.musicEnabled = storageGet('phaseZeroGameMusicEnabled', '1') !== '0';
+      this.musicTrackId = storageGet('phaseZeroGameMusicTrack', 'phase_pulse');
+      if (!GAME_SOUNDTRACKS[this.musicTrackId]) this.musicTrackId = 'phase_pulse';
     }
 
     init() {
@@ -741,7 +780,7 @@
       this.master = this.ctx.createGain();
       this.musicGain = this.ctx.createGain();
       this.master.gain.value = this.muted ? 0 : .72;
-      this.musicGain.gain.value = this.externalMusicActive ? 0 : .13;
+      this.musicGain.gain.value = this.musicTargetGain();
       this.musicGain.connect(this.master);
       this.master.connect(this.ctx.destination);
       this.noiseBuffer = this.ctx.createBuffer(1, this.ctx.sampleRate * .35, this.ctx.sampleRate);
@@ -760,12 +799,34 @@
       dom.muteBtn.textContent = this.muted ? '×' : '♫';
     }
 
+    musicTargetGain() {
+      return this.externalMusicActive || !this.musicEnabled ? 0 : .13;
+    }
+
+    updateMusicGain(timeConstant = .025) {
+      if (!this.musicGain || !this.ctx) return;
+      this.musicGain.gain.cancelScheduledValues(this.ctx.currentTime);
+      this.musicGain.gain.setTargetAtTime(this.musicTargetGain(), this.ctx.currentTime, timeConstant);
+    }
+
     setExternalMusicActive(value) {
       this.externalMusicActive = !!value;
-      if (this.musicGain && this.ctx) {
-        this.musicGain.gain.cancelScheduledValues(this.ctx.currentTime);
-        this.musicGain.gain.setTargetAtTime(this.externalMusicActive ? 0 : .13, this.ctx.currentTime, .025);
-      }
+      this.updateMusicGain(.025);
+    }
+
+    setMusicEnabled(value) {
+      this.musicEnabled = !!value;
+      storageSet('phaseZeroGameMusicEnabled', this.musicEnabled ? '1' : '0');
+      this.updateMusicGain(.025);
+    }
+
+    setMusicTrack(value) {
+      const next = typeof value === 'string' && GAME_SOUNDTRACKS[value] ? value : 'phase_pulse';
+      if (this.musicTrackId === next) return;
+      this.musicTrackId = next;
+      this.step = 0;
+      storageSet('phaseZeroGameMusicTrack', next);
+      if (this.ctx) this.restartMusicTimer();
     }
 
     toggle() { this.setMuted(!this.muted); }
@@ -789,7 +850,7 @@
       osc.start(t); osc.stop(t + duration + .03);
     }
 
-    noise(duration = .12, gain = .08, filterFreq = 900, pan = 0) {
+    noise(duration = .12, gain = .08, filterFreq = 900, pan = 0, destination = null) {
       if (!this.ctx || this.muted || !this.noiseBuffer) return;
       const t = this.ctx.currentTime;
       const src = this.ctx.createBufferSource();
@@ -800,8 +861,8 @@
       filter.type = 'bandpass'; filter.frequency.value = filterFreq; filter.Q.value = .8;
       g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(.0001, t + duration);
       src.connect(filter); filter.connect(g);
-      if (p) { p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(this.master); }
-      else g.connect(this.master);
+      if (p) { p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(destination || this.master); }
+      else g.connect(destination || this.master);
       src.start(t); src.stop(t + duration);
     }
 
@@ -833,16 +894,37 @@
     graze() { this.tone(920, .035, 'sine', .012, 80); }
 
     startMusic() {
-      if (this.musicTimer || !this.ctx) return;
-      const bass = [55, 55, 65.41, 49, 55, 73.42, 65.41, 49];
-      this.musicTimer = setInterval(() => {
-        if (!this.ctx || this.muted || this.externalMusicActive || document.hidden) return;
-        const f = bass[this.step % bass.length];
-        this.tone(f, .34, 'triangle', .055, 0, 0, this.musicGain);
-        if (this.step % 2 === 0) this.tone(f * 2, .11, 'sine', .018, 0, 0, this.musicGain);
-        if (this.step % 4 === 3) this.noise(.045, .012, 3600);
-        this.step++;
-      }, 430);
+      if (!this.ctx) return;
+      this.restartMusicTimer();
+    }
+
+    restartMusicTimer() {
+      if (this.musicTimer) clearInterval(this.musicTimer);
+      const track = GAME_SOUNDTRACKS[this.musicTrackId] || GAME_SOUNDTRACKS.phase_pulse;
+      this.musicTimer = setInterval(() => this.musicStep(track), track.interval);
+    }
+
+    musicStep(track) {
+      if (!this.ctx || this.muted || this.externalMusicActive || !this.musicEnabled || document.hidden) return;
+      const step = this.step;
+      const f = track.bass[step % track.bass.length];
+      const pan = Math.sin(step * .73) * .18;
+      this.tone(f, track.noteLength, track.type, track.bassGain, 0, pan, this.musicGain);
+
+      if (track.harmonyEvery > 0 && step % track.harmonyEvery === 0) {
+        this.tone(f * track.harmonyRatio, Math.min(.18, track.noteLength * .58), 'sine', track.harmonyGain, 0, -pan, this.musicGain);
+      }
+
+      if (track.leadEvery > 0 && step % track.leadEvery === track.leadEvery - 1) {
+        const semitone = track.lead[step % track.lead.length];
+        const leadFrequency = f * Math.pow(2, semitone / 12);
+        this.tone(leadFrequency, Math.min(.22, track.noteLength * .7), 'triangle', track.leadGain, leadFrequency * .08, -pan, this.musicGain);
+      }
+
+      if (track.noiseEvery > 0 && step % track.noiseEvery === track.noiseEvery - 1) {
+        this.noise(.045, track.noiseGain, track.noiseFilter, pan, this.musicGain);
+      }
+      this.step++;
     }
   }
 
@@ -3912,6 +3994,11 @@
         case 'motion':
           input.motionTurnRate = clamp(Number(payload.turnRate) || 0, -3.2, 3.2);
           break;
+        case 'soundtrack':
+          if (payload.enabled !== false) audio.init();
+          if (typeof payload.track === 'string') audio.setMusicTrack(payload.track);
+          if (typeof payload.enabled === 'boolean') audio.setMusicEnabled(payload.enabled);
+          break;
         case 'controller':
           pad.connected = !!payload.connected;
           pad.mx = clamp(Number(payload.mx) || 0, -1, 1);
@@ -3935,6 +4022,12 @@
             nativeSettings.externalMusicActive = payload.externalMusicActive;
             audio.setExternalMusicActive(payload.externalMusicActive);
           }
+          if (typeof payload.gameMusicEnabled === 'boolean') {
+            audio.setMusicEnabled(payload.gameMusicEnabled);
+          }
+          if (typeof payload.gameMusicTrack === 'string') {
+            audio.setMusicTrack(payload.gameMusicTrack);
+          }
           if (typeof payload.sound === 'boolean') {
             nativeSettings.sound = payload.sound;
             audio.setMuted(!payload.sound);
@@ -3955,7 +4048,7 @@
   game = new Game();
   window.phaseZeroGame = game;
   updateIOSWebAppNote();
-  nativePost('ready', { version:'6.0.0', highScore:game.highScore });
+  nativePost('ready', { version:'6.0.6', highScore:game.highScore });
   nativePost('state', { state:game.state, highScore:game.highScore });
 })();
 </script>

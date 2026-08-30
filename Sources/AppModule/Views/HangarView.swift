@@ -29,15 +29,10 @@ struct HangarView: View {
             }
             .navigationTitle("相位机库")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 7) {
-                        Image(systemName: "function")
-                        Text("\(progression.points) Φ")
-                            .monospacedDigit()
-                    }
-                    .font(.headline.weight(.black))
-                    .foregroundStyle(.cyan)
-                }
+                // The old Φ readout lived in the leading toolbar position. iOS 26
+                // rendered it like a tappable glass button even though it had no
+                // action. The same balance is already shown in the trait deck, so
+                // keep only the real dismissal control in the navigation bar.
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
                         .buttonStyle(.glassProminent)

@@ -39,8 +39,12 @@ required=(
   "$INFO_SOURCE"
   "Scripts/repair_built_info_plist.py"
   "Sources/AppModule/PhaseZeroPlaygroundApp.swift"
+  "Sources/AppModule/Model/RadioSystems.swift"
+  "Sources/AppModule/Model/SettingsStore.swift"
   "Sources/AppModule/Services/AppleMusicService.swift"
   "Sources/AppModule/Services/GameBridge.swift"
+  "Sources/AppModule/Views/HangarView.swift"
+  "Sources/AppModule/Views/PhaseRadioView.swift"
   "$HTML_SOURCE"
   "$PRIVACY_SOURCE"
   "$ASSETS_SOURCE/Contents.json"
@@ -67,7 +71,7 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 
 # V6.0.4 exposed the actual issue: targets.<name>.info tells XcodeGen to
-# generate and overwrite a plist at that path. V6.0.5 uses INFOPLIST_FILE
+# generate and overwrite a plist at that path. V6.0.6 preserves the INFOPLIST_FILE pipeline
 # instead. Validate the source plist before and after project generation so
 # this can never silently regress again.
 SOURCE_PLIST_DIAGNOSTICS="$DIST_DIR/source-plist-diagnostics.txt"
@@ -281,7 +285,7 @@ PAYLOAD_DIR="$DIST_DIR/Payload"
 mkdir -p "$PAYLOAD_DIR"
 /usr/bin/ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
 
-IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.5-unsigned.ipa"
+IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.6-unsigned.ipa"
 (
   cd "$DIST_DIR"
   /usr/bin/zip -qry "$(basename "$IPA")" Payload

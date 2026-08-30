@@ -35,9 +35,9 @@ enum AppleMusicAccessState: String, Equatable {
         case .restricted:
             return "此设备的账户或家长控制限制了媒体资料库访问。"
         case .authorized:
-            return "资料库已由系统授权，账号密码不会交给游戏。"
+            return "资料库已由系统授权，游戏原声仍会保留在相位电台中。"
         case .needsAppService:
-            return "当前签名的 App ID 尚未启用 MusicKit 服务，代码已经就位，证书部门还在履行其传统职责。"
+            return "当前签名的 App ID 尚未启用 MusicKit 服务。"
         }
     }
 }
@@ -60,6 +60,7 @@ final class AppleMusicService: ObservableObject {
     @Published private(set) var songs: [AppleMusicSongSummary] = []
     @Published private(set) var playlists: [AppleMusicPlaylistSummary] = []
     @Published private(set) var isLoadingLibrary = false
+    @Published private(set) var isPreparingPlayback = false
     @Published private(set) var isPlaying = false
     @Published private(set) var playbackTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
@@ -76,11 +77,23 @@ final class AppleMusicService: ObservableObject {
     private var libraryPlaylists: [Playlist] = []
     #endif
 
+    /// Called when actual playback starts or stops.
     var onPlaybackActivityChanged: ((Bool) -> Void)?
 
+    /// Called before a queue change as well as after playback changes. The game
+    /// can fade its procedural soundtrack before MusicKit takes the audio queue,
+    /// avoiding two nonmixable players fighting during prepare/play.
+    var onAudioFocusChanged: ((Bool) -> Void)?
+
+    var holdsAudioFocus: Bool { isPreparingPlayback || isPlaying }
+
     private var monitorTask: Task<Void, Never>?
+    private var playbackCommandTask: Task<Void, Never>?
+    private var playbackRequestID = UUID()
     private var isScrubbing = false
+    private var hasQueuedContent = false
     private var lastReportedPlaybackActivity = false
+    private var lastReportedAudioFocus = false
     private var lastEntryIdentity: String?
 
     init() {
@@ -177,52 +190,71 @@ final class AppleMusicService: ObservableObject {
 
     func playSong(id: String) {
         #if canImport(MusicKit)
-        guard let song = librarySongs.first(where: { String(describing: $0.id) == id }) else { return }
-        Task { [weak self] in
+        guard let song = librarySongs.first(where: { String(describing: $0.id) == id }) else {
+            errorMessage = "没有在当前资料库快照中找到这首歌，请刷新后重试。"
+            return
+        }
+
+        let requestID = beginPlaybackTransition()
+        playbackCommandTask = Task { [weak self] in
             guard let self else { return }
-            do {
-                let queue = ApplicationMusicPlayer.Queue(for: [song])
-                self.player.queue = queue
-                self.duration = song.duration ?? 0
-                self.currentTitle = song.title
-                self.currentSubtitle = song.artistName
-                self.currentTrackSeed = "\(song.title)|\(song.artistName)"
-                self.currentArtwork = song.artwork
-                try await self.player.prepareToPlay()
-                try await self.player.play()
-                self.refreshPlaybackSnapshot()
-            } catch {
-                self.handleMusicKitError(error)
-            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
+
+            self.player.pause()
+            self.player.queue = ApplicationMusicPlayer.Queue(for: [song])
+            self.hasQueuedContent = true
+            self.duration = song.duration ?? 0
+            self.currentTitle = song.title
+            self.currentSubtitle = song.artistName
+            self.currentTrackSeed = "\(song.title)|\(song.artistName)"
+            self.currentArtwork = song.artwork
+            self.lastEntryIdentity = nil
+
+            await self.startCurrentQueue(requestID: requestID)
         }
         #endif
     }
 
     func playPlaylist(id: String) {
         #if canImport(MusicKit)
-        guard let playlist = libraryPlaylists.first(where: { String(describing: $0.id) == id }) else { return }
-        Task { [weak self] in
+        guard let playlist = libraryPlaylists.first(where: { String(describing: $0.id) == id }) else {
+            errorMessage = "没有在当前资料库快照中找到这个歌单，请刷新后重试。"
+            return
+        }
+
+        let requestID = beginPlaybackTransition()
+        playbackCommandTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let resolvedPlaylist = try await playlist.with([.entries], preferredSource: .library)
+                guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
                 guard let entries = resolvedPlaylist.entries, let firstEntry = entries.first else {
+                    self.finishPlaybackTransition(requestID: requestID)
                     self.errorMessage = "这个歌单没有返回可播放曲目。"
                     return
                 }
-                let queue = ApplicationMusicPlayer.Queue(
+
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
+
+                self.player.pause()
+                self.player.queue = ApplicationMusicPlayer.Queue(
                     playlist: resolvedPlaylist,
                     startingAt: firstEntry
                 )
-                self.player.queue = queue
+                self.hasQueuedContent = true
                 self.duration = 0
                 self.currentTitle = resolvedPlaylist.name
                 self.currentSubtitle = "Apple Music 资料库歌单"
                 self.currentTrackSeed = "playlist|\(resolvedPlaylist.name)"
                 self.currentArtwork = resolvedPlaylist.artwork
-                try await self.player.prepareToPlay()
-                try await self.player.play()
-                self.refreshPlaybackSnapshot()
+                self.lastEntryIdentity = nil
+
+                await self.startCurrentQueue(requestID: requestID)
             } catch {
+                guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
+                self.finishPlaybackTransition(requestID: requestID)
                 self.handleMusicKitError(error)
             }
         }
@@ -231,49 +263,42 @@ final class AppleMusicService: ObservableObject {
 
     func togglePlayback() {
         #if canImport(MusicKit)
-        if isPlaying {
-            player.pause()
-            refreshPlaybackSnapshot()
-        } else {
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await self.player.play()
-                    self.refreshPlaybackSnapshot()
-                } catch {
-                    self.handleMusicKitError(error)
-                }
-            }
+        if isPlaying || isPreparingPlayback {
+            pausePlayback(clearError: true)
+            return
+        }
+
+        guard hasQueuedContent else {
+            errorMessage = "请先从 Apple Music 资料库中选择一首歌或一个歌单。"
+            return
+        }
+
+        let requestID = beginPlaybackTransition(pausePlayer: false)
+        playbackCommandTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
+            await self.startCurrentQueue(requestID: requestID)
         }
         #endif
     }
 
+    func pauseForGameSoundtrack() {
+        pausePlayback(clearError: true)
+    }
+
     func skipNext() {
         #if canImport(MusicKit)
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.player.skipToNextEntry()
-                try? await Task.sleep(nanoseconds: 140_000_000)
-                self.refreshPlaybackSnapshot()
-            } catch {
-                self.handleMusicKitError(error)
-            }
+        runTransportCommand {
+            try await self.player.skipToNextEntry()
         }
         #endif
     }
 
     func skipPrevious() {
         #if canImport(MusicKit)
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.player.skipToPreviousEntry()
-                try? await Task.sleep(nanoseconds: 140_000_000)
-                self.refreshPlaybackSnapshot()
-            } catch {
-                self.handleMusicKitError(error)
-            }
+        runTransportCommand {
+            try await self.player.skipToPreviousEntry()
         }
         #endif
     }
@@ -296,23 +321,33 @@ final class AppleMusicService: ObservableObject {
         refreshPlaybackSnapshot()
     }
 
+    func clearError() {
+        errorMessage = nil
+    }
+
     func refreshPlaybackSnapshot() {
         #if canImport(MusicKit)
         let active = player.state.playbackStatus == .playing
         if active != isPlaying { isPlaying = active }
         reportPlaybackActivityIfNeeded(active)
+        reportAudioFocusIfNeeded()
+
+        // A queue-interruption error can arrive from an obsolete preparation task
+        // after the replacement queue has already started. Never keep displaying a
+        // raw failure banner while MusicKit is demonstrably playing successfully.
+        if active, errorMessage != nil {
+            errorMessage = nil
+        }
 
         if !isScrubbing {
             playbackTime = max(0, player.playbackTime)
         }
 
         if let entry = player.queue.currentEntry {
+            hasQueuedContent = true
             let subtitle = entry.subtitle ?? "Apple Music"
             let identity = "\(entry.title)|\(subtitle)"
 
-            // Queue metadata only changes when the entry changes. Avoid publishing the
-            // same title, artwork and duration four times a second, which used to make
-            // every glass panel in the radio rebuild while a progress slider was moving.
             if identity != lastEntryIdentity {
                 lastEntryIdentity = identity
                 currentTitle = entry.title
@@ -349,18 +384,159 @@ final class AppleMusicService: ObservableObject {
         monitorTask = nil
     }
 
+    #if canImport(MusicKit)
+    private func beginPlaybackTransition(pausePlayer: Bool = true) -> UUID {
+        playbackCommandTask?.cancel()
+        let requestID = UUID()
+        playbackRequestID = requestID
+        errorMessage = nil
+        setPreparingPlayback(true)
+        if pausePlayer {
+            player.pause()
+            isPlaying = false
+            reportPlaybackActivityIfNeeded(false)
+        }
+        reportAudioFocusIfNeeded()
+        return requestID
+    }
+
+    private func startCurrentQueue(requestID: UUID) async {
+        guard isCurrentRequest(requestID), !Task.isCancelled else { return }
+
+        do {
+            try await player.play()
+        } catch {
+            guard isCurrentRequest(requestID), !Task.isCancelled else { return }
+
+            if isQueueInterruption(error) {
+                // Error 2 can be delivered by an obsolete queue request even after
+                // the replacement queue has already won the handoff. Check the real
+                // player state before issuing another play command; retry only when
+                // the new queue is still genuinely idle.
+                try? await Task.sleep(nanoseconds: 260_000_000)
+                guard isCurrentRequest(requestID), !Task.isCancelled else { return }
+                refreshPlaybackSnapshot()
+                if isPlaying {
+                    finishPlaybackTransition(requestID: requestID)
+                    errorMessage = nil
+                    return
+                }
+
+                do {
+                    try await player.play()
+                } catch {
+                    guard isCurrentRequest(requestID), !Task.isCancelled else { return }
+                    refreshPlaybackSnapshot()
+                    finishPlaybackTransition(requestID: requestID)
+                    if !isPlaying { handleMusicKitError(error) }
+                    return
+                }
+            } else {
+                finishPlaybackTransition(requestID: requestID)
+                handleMusicKitError(error)
+                return
+            }
+        }
+
+        guard isCurrentRequest(requestID), !Task.isCancelled else { return }
+        try? await Task.sleep(nanoseconds: 90_000_000)
+        refreshPlaybackSnapshot()
+        finishPlaybackTransition(requestID: requestID)
+        if isPlaying {
+            errorMessage = nil
+        }
+    }
+
+    private func runTransportCommand(_ operation: @escaping @MainActor () async throws -> Void) {
+        errorMessage = nil
+        playbackCommandTask?.cancel()
+        let requestID = UUID()
+        playbackRequestID = requestID
+        playbackCommandTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await operation()
+                guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 140_000_000)
+                self.refreshPlaybackSnapshot()
+                self.errorMessage = nil
+            } catch {
+                guard self.isCurrentRequest(requestID), !Task.isCancelled else { return }
+                self.refreshPlaybackSnapshot()
+                if !self.isPlaying { self.handleMusicKitError(error) }
+            }
+        }
+    }
+
+    private func pausePlayback(clearError: Bool) {
+        playbackCommandTask?.cancel()
+        playbackRequestID = UUID()
+        player.pause()
+        setPreparingPlayback(false)
+        isPlaying = false
+        reportPlaybackActivityIfNeeded(false)
+        reportAudioFocusIfNeeded()
+        if clearError { errorMessage = nil }
+        refreshPlaybackSnapshot()
+    }
+
+    private func isCurrentRequest(_ requestID: UUID) -> Bool {
+        requestID == playbackRequestID
+    }
+
+    private func finishPlaybackTransition(requestID: UUID) {
+        guard isCurrentRequest(requestID) else { return }
+        setPreparingPlayback(false)
+        playbackCommandTask = nil
+    }
+    #else
+    private func pausePlayback(clearError: Bool) {
+        if clearError { errorMessage = nil }
+    }
+    #endif
+
+    private func setPreparingPlayback(_ value: Bool) {
+        guard isPreparingPlayback != value else { return }
+        isPreparingPlayback = value
+        reportAudioFocusIfNeeded()
+    }
+
     private func reportPlaybackActivityIfNeeded(_ active: Bool) {
         guard active != lastReportedPlaybackActivity else { return }
         lastReportedPlaybackActivity = active
         onPlaybackActivityChanged?(active)
     }
 
+    private func reportAudioFocusIfNeeded() {
+        let focused = holdsAudioFocus
+        guard focused != lastReportedAudioFocus else { return }
+        lastReportedAudioFocus = focused
+        onAudioFocusChanged?(focused)
+    }
+
+    private func isQueueInterruption(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == "MPMusicPlayerControllerErrorDomain", nsError.code == 2 {
+            return true
+        }
+        let text = "\(nsError.localizedDescription) \(nsError.userInfo)".lowercased()
+        return text.contains("queue was interrupted") || text.contains("队列") && text.contains("中断")
+    }
+
     private func handleMusicKitError(_ error: Error) {
-        let text = error.localizedDescription
-        errorMessage = text
+        let nsError = error as NSError
+        let text = "\(nsError.localizedDescription) \(nsError.userInfo)"
         let lowered = text.lowercased()
-        if lowered.contains("developer token") || lowered.contains("music user token") || lowered.contains("not authorized") {
+
+        if isQueueInterruption(error) {
+            errorMessage = "Apple Music 切换播放队列时被系统打断。已自动重试；若仍未播放，请再点一次曲目。"
+        } else if nsError.domain == "MPMusicPlayerControllerErrorDomain", nsError.code == 6 {
+            errorMessage = "这首曲目当前无法由 MusicKit 播放，可能尚未下载、地区不可用或不在有效订阅范围内。"
+        } else if lowered.contains("developer token") || lowered.contains("music user token") || lowered.contains("not authorized") {
             accessState = .needsAppService
+            errorMessage = "MusicKit 服务认证失败。请确认当前 Bundle ID 已启用 MusicKit App Service。"
+        } else {
+            errorMessage = nsError.localizedDescription
         }
     }
 }

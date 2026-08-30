@@ -60,6 +60,8 @@ final class SettingsStore: ObservableObject {
         static let spectaclePreset = "native.spectaclePreset"
         static let interfaceParallax = "native.interfaceParallax"
         static let duckGameMusicForAppleMusic = "native.duckGameMusicForAppleMusic"
+        static let gameMusicEnabled = "native.gameMusicEnabled"
+        static let gameMusicTrackID = "native.gameMusicTrackID"
     }
 
     private let defaults: UserDefaults
@@ -82,6 +84,8 @@ final class SettingsStore: ObservableObject {
     @Published var spectaclePreset: SpectaclePreset { didSet { save(Key.spectaclePreset, spectaclePreset.rawValue) } }
     @Published var interfaceParallaxEnabled: Bool { didSet { save(Key.interfaceParallax, interfaceParallaxEnabled) } }
     @Published var duckGameMusicForAppleMusic: Bool { didSet { save(Key.duckGameMusicForAppleMusic, duckGameMusicForAppleMusic) } }
+    @Published var gameMusicEnabled: Bool { didSet { save(Key.gameMusicEnabled, gameMusicEnabled) } }
+    @Published var gameMusicTrackID: String { didSet { save(Key.gameMusicTrackID, gameMusicTrackID) } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -101,6 +105,9 @@ final class SettingsStore: ObservableObject {
         self.spectaclePreset = SpectaclePreset(rawValue: defaults.string(forKey: Key.spectaclePreset) ?? "") ?? .cinematic
         self.interfaceParallaxEnabled = defaults.object(forKey: Key.interfaceParallax) as? Bool ?? true
         self.duckGameMusicForAppleMusic = defaults.object(forKey: Key.duckGameMusicForAppleMusic) as? Bool ?? true
+        self.gameMusicEnabled = defaults.object(forKey: Key.gameMusicEnabled) as? Bool ?? true
+        let storedTrackID = defaults.string(forKey: Key.gameMusicTrackID) ?? BuiltInSoundtrack.fallback.id
+        self.gameMusicTrackID = BuiltInSoundtrack.definition(for: storedTrackID).id
     }
 
     func nativePayload(performance: PerformanceSnapshot, externalMusicActive: Bool) -> [String: Any] {
@@ -113,7 +120,9 @@ final class SettingsStore: ObservableObject {
             "targetFPS": performance.targetFPS,
             "motionAim": motionAimEnabled,
             "spectacleScale": spectaclePreset.nativeFXScale,
-            "externalMusicActive": externalMusicActive && duckGameMusicForAppleMusic
+            "externalMusicActive": externalMusicActive && duckGameMusicForAppleMusic,
+            "gameMusicEnabled": gameMusicEnabled,
+            "gameMusicTrack": BuiltInSoundtrack.definition(for: gameMusicTrackID).id
         ]
     }
 

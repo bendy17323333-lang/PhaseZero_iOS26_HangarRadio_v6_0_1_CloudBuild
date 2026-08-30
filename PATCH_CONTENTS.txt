@@ -1,0 +1,11 @@
+Phase Zero 6.0.6 runtime hotfix
+
+Copy the CONTENTS of this folder to the root of an existing 6.0.5 GitHub repository and allow all listed paths to overwrite.
+
+Includes:
+- removal of the two misleading leading toolbar status controls;
+- persistent built-in game soundtrack library;
+- four selectable procedural OST profiles;
+- serialized MusicKit queue handoff and stale Code 2 suppression;
+- complete game-music bus ducking;
+- 6.0.6 / build 16 metadata and workflow names.

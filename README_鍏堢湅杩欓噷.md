@@ -1,60 +1,72 @@
-# 零点相位 6.0.5：XcodeGen Info.plist 覆盖修复
+# 零点相位 6.0.6：机库 / 相位电台运行时修复
 
-6.0.4 的 Xcode 编译本身已经成功，但构建脚本随后报：
+这是基于 6.0.5 完整云构建分支的增量版本，Bundle ID 保持：
 
 ```text
-NSAppleMusicUsageDescription is missing after repair
+com.asher.phasezero.ios26hangarradio600
 ```
 
-本次确认根因不是 MusicKit，也不是 Python 无法写入中文字符串，而是 `project.yml` 中使用了 XcodeGen 的 `info:` 生成器。该配置会在每次 `xcodegen generate` 时重新写入指定路径的 Info.plist；由于没有同时在 `info.properties` 中列出自定义键，原来的 Apple Music、陀螺仪、启动屏和方向字段被生成过程覆盖。
+因此原有 MusicKit App Service 配置无需重建。
 
-6.0.5 改为直接设置：
+## 本次修复
 
-```yaml
-GENERATE_INFOPLIST_FILE: NO
-INFOPLIST_FILE: BuildSupport/Info.plist
-```
+- 删除机库左上角无动作的 `Φ` 状态胶囊；点数仍显示在机型特性区域。
+- 删除相位电台左上角无动作的 Apple Music 状态胶囊；授权状态移到内容区。
+- Apple Music 授权后，游戏原声不再从电台界面消失。
+- 新增“游戏原声”来源与四个程序合成循环，可在电台中切换、暂停和恢复。
+- Apple Music 与游戏原声共用统一正在播放面板和音频可视化。
+- 修复 `MPMusicPlayerControllerErrorDomain Code 2` 造成的陈旧错误横幅：
+  - 串行化队列切换；
+  - 取消过期播放任务；
+  - 队列切换前先让游戏原声淡出；
+  - 检测到新队列已经播放时，把旧队列错误视为过期事件；
+  - 仅在新队列确实未播放时显示友好错误。
+- 游戏原声的噪声节拍现在也经过独立音乐总线；“压低游戏原声”不会漏出节拍噪声，同时射击与命中音效继续保留。
 
-并彻底删除 target 的 `info:` 块。构建脚本会在 XcodeGen 前后计算源 plist 的 SHA-256；只要生成过程再改动它，构建立即失败并指出原因。
+## 现有仓库更新
 
-## 更新现有仓库
-
-解压 `PhaseZero_iOS26_HangarRadio_v6_0_5_InfoPlistHotfix_ONLY.zip`，把最外层文件夹里的内容按原路径上传到仓库根目录并覆盖旧文件。必须包含隐藏的 `.github` 文件夹。
+解压 `PhaseZero_iOS26_HangarRadio_v6_0_6_RuntimeHotfix_ONLY.zip`，把最外层文件夹内部内容按原路径覆盖到仓库根目录。必须确认隐藏的 `.github` 文件夹也已上传。
 
 随后运行：
 
 ```text
-Build Phase Zero 6.0.5 unsigned IPA
+Build Phase Zero 6.0.6 unsigned IPA
 ```
 
 成功产物：
 
 ```text
-PhaseZero-HangarRadio-6.0.5-unsigned-ipa
+PhaseZero-HangarRadio-6.0.6-unsigned-ipa
 ```
 
-其中应包含：
+其中包含：
 
 ```text
-PhaseZero-HangarRadio-6.0.5-unsigned.ipa
-PhaseZero-HangarRadio-6.0.5-unsigned.ipa.sha256
+PhaseZero-HangarRadio-6.0.6-unsigned.ipa
+PhaseZero-HangarRadio-6.0.6-unsigned.ipa.sha256
 source-plist-diagnostics.txt
 fullscreen-diagnostics.txt
 ipa-metadata-diagnostics.txt
 ```
 
-`source-plist-diagnostics.txt` 中，XcodeGen 前后的两个 SHA-256 必须一致。
+## 干净仓库构建
 
-`ipa-metadata-diagnostics.txt` 中应显示：
+也可以使用完整 `PhaseZero_iOS26_HangarRadio_v6_0_6_CloudBuild.zip`：
 
-```text
-UILaunchStoryboardName='LaunchScreen'
-UIDeviceFamily=[1, 2]
-NSAppleMusicUsageDescription present=True
-NSMotionUsageDescription present=True
-resource LaunchScreen.storyboardc=True
-```
+1. 新建空 GitHub 仓库。
+2. 解压完整包。
+3. 上传解压后目录内部的全部内容。
+4. 在 Actions 运行 `Build Phase Zero 6.0.6 unsigned IPA`。
+5. 下载 unsigned IPA，再使用你的签名工具重签并安装。
 
-## 安装
+## 推荐真机测试
 
-优先覆盖安装，以保留演算点和机型进度。若仍处于 480×320 兼容画布，再删除旧 App、重启 iPhone并重新签名安装。删除 App 会清除未备份的本地进度。
+1. 打开机库，确认左上角只剩系统导航区域，不再出现无动作 `f(x)` 胶囊。
+2. 打开相位电台，确认左上角不再出现无动作状态按钮。
+3. 已授权 Apple Music 的情况下，确认右侧仍有“游戏原声”区。
+4. 播放一首 Apple Music 曲目，确认游戏原声按设置淡出，射击等音效仍可用。
+5. 连续快速点击两首歌，确认不会长期留下错误 2 横幅。
+6. Apple Music 暂停后选择任意游戏原声，确认程序音乐恢复。
+7. 关闭“Apple Music 播放时压低游戏原声”，确认允许两者同时输出。
+
+如果 Apple Music 曲目完全无法开始播放，而不是“已经播放但显示旧错误”，请保留设备控制台中包含 `MPMusicPlayerControllerErrorDomain` 的完整行。不同错误码需要分别处理。
