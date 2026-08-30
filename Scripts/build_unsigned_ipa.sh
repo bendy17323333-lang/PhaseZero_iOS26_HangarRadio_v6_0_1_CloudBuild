@@ -31,6 +31,7 @@ done
 HTML_SOURCE="Sources/AppModule/Resources/Web/phase_zero_native.html"
 PRIVACY_SOURCE="Sources/AppModule/Resources/PrivacyInfo.xcprivacy"
 ASSETS_SOURCE="Sources/AppModule/Resources/Assets.xcassets"
+LAUNCH_STORYBOARD_SOURCE="Sources/AppModule/Resources/LaunchScreen.storyboard"
 
 required=(
   "project.yml"
@@ -41,6 +42,7 @@ required=(
   "$HTML_SOURCE"
   "$PRIVACY_SOURCE"
   "$ASSETS_SOURCE/Contents.json"
+  "$LAUNCH_STORYBOARD_SOURCE"
 )
 for path in "${required[@]}"; do
   if [[ ! -e "$path" ]]; then
@@ -50,7 +52,7 @@ for path in "${required[@]}"; do
 done
 
 rm -rf "$BUILD_DIR/DerivedData" "$PROJECT" "$DIST_DIR/Payload"
-rm -f "$DIST_DIR"/*.ipa "$DIST_DIR"/*.sha256
+rm -f "$DIST_DIR"/*.ipa "$DIST_DIR"/*.sha256 "$DIST_DIR/fullscreen-diagnostics.txt"
 
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "::error::XcodeGen is not installed."
@@ -61,7 +63,7 @@ xcodegen generate --spec project.yml
 
 # Fail before the expensive compile if XcodeGen did not actually put the game
 # resource and asset catalog into the generated project.
-for expected in "phase_zero_native.html" "Assets.xcassets" "PrivacyInfo.xcprivacy"; do
+for expected in "phase_zero_native.html" "Assets.xcassets" "PrivacyInfo.xcprivacy" "LaunchScreen.storyboard"; do
   if ! grep -Fq "$expected" "$PBXPROJ"; then
     echo "::error file=project.yml::Generated Xcode project is missing $expected. Check the resource entries under targets.PhaseZero.sources."
     exit 6
@@ -143,6 +145,43 @@ if [[ ! -f "$APP_PATH/Assets.car" ]]; then
   exit 7
 fi
 
+LAUNCH_STORYBOARDC="$(find "$APP_PATH" -maxdepth 2 -type d -name 'LaunchScreen.storyboardc' -print -quit)"
+if [[ -z "$LAUNCH_STORYBOARDC" || ! -d "$LAUNCH_STORYBOARDC" ]]; then
+  echo "::error::The app bundle does not contain LaunchScreen.storyboardc. Without a compiled launch storyboard, modern iPhones can fall back to the legacy 480x320 compatibility canvas."
+  exit 9
+fi
+
+FULLSCREEN_DIAGNOSTICS="$DIST_DIR/fullscreen-diagnostics.txt"
+python3 - "$APP_PATH/Info.plist" "$FULLSCREEN_DIAGNOSTICS" <<'PYINFO'
+import plistlib
+import sys
+
+info_path, report_path = sys.argv[1], sys.argv[2]
+with open(info_path, 'rb') as handle:
+    info = plistlib.load(handle)
+launch_name = info.get('UILaunchStoryboardName')
+families = info.get('UIDeviceFamily', [])
+orientations = info.get('UISupportedInterfaceOrientations', [])
+lines = [
+    f"UILaunchStoryboardName={launch_name!r}",
+    f"UIDeviceFamily={families!r}",
+    f"UISupportedInterfaceOrientations={orientations!r}",
+    f"MinimumOSVersion={info.get('MinimumOSVersion')!r}",
+]
+with open(report_path, 'w', encoding='utf-8') as report:
+    report.write("\n".join(lines) + "\n")
+print("Fullscreen metadata check:")
+for line in lines:
+    print("  " + line)
+if launch_name != 'LaunchScreen':
+    raise SystemExit('Final app Info.plist is missing UILaunchStoryboardName=LaunchScreen')
+if 1 not in families:
+    raise SystemExit('Final app UIDeviceFamily does not include iPhone (1)')
+required = {'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'}
+if not required.issubset(set(orientations)):
+    raise SystemExit('Final app does not advertise both landscape orientations for iPhone')
+PYINFO
+
 for packaged in "$HTML_PATH" "$PRIVACY_PATH" "$APP_PATH/Assets.car"; do
   if [[ ! -s "$packaged" ]]; then
     echo "::error file=$packaged::Required packaged resource is missing or empty."
@@ -154,12 +193,13 @@ echo "Packaged resource check:"
 echo "  HTML:   ${HTML_PATH#$APP_PATH/}"
 echo "  Privacy:${PRIVACY_PATH#$APP_PATH/}"
 echo "  Assets: Assets.car"
+echo "  Launch: ${LAUNCH_STORYBOARDC#$APP_PATH/}"
 
 PAYLOAD_DIR="$DIST_DIR/Payload"
 mkdir -p "$PAYLOAD_DIR"
 /usr/bin/ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
 
-IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.2-unsigned.ipa"
+IPA="$DIST_DIR/PhaseZero-HangarRadio-6.0.3-unsigned.ipa"
 (
   cd "$DIST_DIR"
   /usr/bin/zip -qry "$(basename "$IPA")" Payload
@@ -173,6 +213,7 @@ test -s "$IPA"
 /usr/bin/unzip -l "$IPA" | grep -Fq "phase_zero_native.html"
 /usr/bin/unzip -l "$IPA" | grep -Fq "PrivacyInfo.xcprivacy"
 /usr/bin/unzip -l "$IPA" | grep -Fq "Assets.car"
+/usr/bin/unzip -l "$IPA" | grep -Fq "LaunchScreen.storyboardc"
 
 echo "Built: $IPA"
 cat "$IPA.sha256"

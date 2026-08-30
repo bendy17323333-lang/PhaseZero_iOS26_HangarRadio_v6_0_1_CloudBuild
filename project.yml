@@ -31,6 +31,8 @@ targets:
         buildPhase: resources
       - path: Sources/AppModule/Resources/PrivacyInfo.xcprivacy
         buildPhase: resources
+      - path: Sources/AppModule/Resources/LaunchScreen.storyboard
+        buildPhase: resources
       - path: Sources/AppModule/Resources/Web/phase_zero_native.html
         buildPhase: resources
         group: Resources/Web
@@ -40,8 +42,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.asher.phasezero.ios26hangarradio600
         PRODUCT_NAME: PhaseZero
-        MARKETING_VERSION: "6.0.2"
-        CURRENT_PROJECT_VERSION: "12"
+        MARKETING_VERSION: "6.0.3"
+        CURRENT_PROJECT_VERSION: "13"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         TARGETED_DEVICE_FAMILY: "1,2"
