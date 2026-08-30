@@ -1,0 +1,52 @@
+name: PhaseZero
+options:
+  bundleIdPrefix: com.asher
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SUPPORTS_MACCATALYST: NO
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+targets:
+  PhaseZero:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources/AppModule
+        excludes:
+          - Resources
+          - Model/MusicModels.swift
+          - Services/MusicPlayerService.swift
+          - Views/MusicPlayerView.swift
+    resources:
+      - path: Sources/AppModule/Resources
+    info:
+      path: BuildSupport/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asher.phasezero.ios26hangarradio600
+        PRODUCT_NAME: PhaseZero
+        MARKETING_VERSION: "6.0.1"
+        CURRENT_PROJECT_VERSION: "11"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_STRICT_CONCURRENCY: minimal
+schemes:
+  PhaseZero:
+    build:
+      targets:
+        PhaseZero: all
+    run:
+      config: Debug
+    archive:
+      config: Release
